@@ -51,4 +51,3 @@ pub(crate) fn get_available_tokens(
         .collect();
     tokens
 }
-

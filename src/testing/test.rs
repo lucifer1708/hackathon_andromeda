@@ -16,7 +16,6 @@ use crate::{
         MOCK_CONDITIONS_MET_CONTRACT, MOCK_CONDITIONS_NOT_MET_CONTRACT, MOCK_RATES_CONTRACT,
         MOCK_ROYALTY_RECIPIENT, MOCK_TAX_RECIPIENT, MOCK_TOKENS_FOR_SALE, MOCK_TOKEN_CONTRACT,
     },
-    testing::test,
 };
 use andromeda_std::{
     ado_base::modules::Module,
@@ -1635,7 +1634,7 @@ fn test_end_sale_limit_zero() {
             deps.as_mut().storage,
             &State {
                 expiration: Expiration::AtHeight(mock_env().block.height - 1),
-                price: Some((coin(100, "uusd"))),
+                price: Some(coin(100, "uusd")),
                 min_tokens_sold: Uint128::from(1u128),
                 max_amount_per_wallet: 5,
                 amount_sold: Uint128::from(1u128),

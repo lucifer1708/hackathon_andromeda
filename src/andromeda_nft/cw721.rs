@@ -8,7 +8,6 @@ use cw721::Expiration;
 
 use cw721_base::{ExecuteMsg as Cw721ExecuteMsg, QueryMsg as Cw721QueryMsg};
 
-
 #[andr_instantiate]
 #[andr_instantiate_modules]
 #[cw_serde]
