@@ -43,7 +43,7 @@ impl MockCrowdfund {
                 sender.clone(),
                 &msg,
                 &[],
-                "Andromeda Crowdfund Contract",
+                "Andromeda Hackathon Crowdfund Contract",
                 Some(sender.to_string()),
             )
             .unwrap();
