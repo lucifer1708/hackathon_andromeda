@@ -6,6 +6,7 @@ on:
 
 jobs:
   release:
+    name: Liniting
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -18,6 +19,7 @@ jobs:
           toolchain: stable
           target: wasm32-unknown-unknown
           override: true
+
       - name: Install cargo-run-script
         uses: actions-rs/cargo@v1
         with:
