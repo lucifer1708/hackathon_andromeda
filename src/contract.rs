@@ -19,13 +19,13 @@ use andromeda_std::{
     error::{from_semver, ContractError},
     Expiration,
 };
-use cw2::{get_contract_version, set_contract_version, ContractVersion};
+use cw2::{get_contract_version, set_contract_version};
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    coin, coins, ensure, has_coins, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env,
-    MessageInfo, Order, QuerierWrapper, QueryRequest, Reply, Response, StdError, StdResult,
+    coin, coins, ensure, has_coins, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env,
+    MessageInfo, Order, QuerierWrapper, QueryRequest, Reply, Response, StdError,
     Storage, SubMsg, Uint128, WasmMsg, WasmQuery,
 };
 use cw721::TokensResponse;
