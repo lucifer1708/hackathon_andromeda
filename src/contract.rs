@@ -122,12 +122,20 @@ pub fn handle_execute(ctx: ExecuteContext, msg: ExecuteMsg) -> Result<Response, 
         ExecuteMsg::StartSale {
             expiration,
             price,
+            min_tokens_sold,
             max_amount_per_wallet,
             recipient,
-        } => execute_start_sale(ctx, expiration, price, max_amount_per_wallet, recipient),
+        } => execute_start_sale(
+            ctx,
+            expiration,
+            price,
+            min_tokens_sold,
+            max_amount_per_wallet,
+            recipient,
+        ),
         ExecuteMsg::Purchase { number_of_tokens } => execute_purchase(ctx, number_of_tokens),
         ExecuteMsg::PurchaseByTokenId { token_id } => execute_purchase_by_token_id(ctx, token_id),
-        // ExecuteMsg::ClaimRefund {} => execute_claim_refund(ctx),
+        ExecuteMsg::ClaimRefund {} => execute_claim_refund(ctx),
         ExecuteMsg::EndSale { limit } => execute_end_sale(ctx, limit),
         _ => ADOContract::default().execute(ctx, msg),
     }
@@ -227,6 +235,7 @@ fn execute_start_sale(
     ctx: ExecuteContext,
     expiration: Expiration,
     price: Coin,
+    min_tokens_sold: Option<Uint128>,
     max_amount_per_wallet: Option<u32>,
     recipient: Recipient,
 ) -> Result<Response, ContractError> {
@@ -262,6 +271,7 @@ fn execute_start_sale(
         &State {
             expiration,
             price,
+            min_tokens_sold,
             max_amount_per_wallet,
             amount_sold: Uint128::zero(),
             amount_to_send: Uint128::zero(),
@@ -276,6 +286,10 @@ fn execute_start_sale(
         .add_attribute("action", "start_sale")
         .add_attribute("expiration", expiration.to_string())
         .add_attribute("price", price_str)
+        .add_attribute(
+            "min_tokens_sold",
+            min_tokens_sold.map_or_else(|| "None".to_string(), |v| v.to_string()),
+        )
         .add_attribute("max_amount_per_wallet", max_amount_per_wallet.to_string()))
 }
 
@@ -473,9 +487,40 @@ fn purchase_tokens(
     Ok(required_payment)
 }
 
+fn execute_claim_refund(ctx: ExecuteContext) -> Result<Response, ContractError> {
+    let ExecuteContext {
+        deps, info, env, ..
+    } = ctx;
+    nonpayable(&info)?;
+
+    let state = STATE.may_load(deps.storage)?;
+    ensure!(state.is_some(), ContractError::NoOngoingSale {});
+    let state = state.unwrap();
+    ensure!(
+        state.expiration.is_expired(&env.block),
+        ContractError::SaleNotEnded {}
+    );
+    if let Some(min_tokens) = state.min_tokens_sold {
+        ensure!(
+            state.amount_sold < min_tokens,
+            ContractError::MinSalesExceeded {}
+        );
+    }
+    let purchases = PURCHASES.may_load(deps.storage, info.sender.as_str())?;
+    ensure!(purchases.is_some(), ContractError::NoPurchases {});
+    let purchases = purchases.unwrap();
+    let refund_msg = process_refund(deps.storage, &purchases, &state.price);
+    let mut resp = Response::new();
+    if let Some(refund_msg) = refund_msg {
+        resp = resp.add_message(refund_msg);
+    }
+
+    Ok(resp.add_attribute("action", "claim_refund"))
+}
+
 fn execute_end_sale(ctx: ExecuteContext, limit: Option<u32>) -> Result<Response, ContractError> {
     let ExecuteContext {
-        deps,
+        mut deps,
         info,
         env,
         amp_ctx,
@@ -491,15 +536,70 @@ fn execute_end_sale(ctx: ExecuteContext, limit: Option<u32>) -> Result<Response,
         state.expiration.is_expired(&env.block) || number_of_tokens_available.is_zero(),
         ContractError::SaleNotEnded {}
     );
-    transfer_tokens_and_send_funds(
-        ExecuteContext {
-            deps,
-            info,
-            env,
-            amp_ctx,
-        },
-        limit,
-    )
+    let min_tokens_sold_value = state.min_tokens_sold.unwrap();
+
+    if Some(min_tokens_sold_value).is_some() {
+        if state.amount_sold < state.min_tokens_sold.unwrap() {
+            issue_refunds_and_burn_tokens(&mut deps, env, limit)
+        } else {
+            transfer_tokens_and_send_funds(
+                ExecuteContext {
+                    deps,
+                    info,
+                    env,
+                    amp_ctx,
+                },
+                limit,
+            )
+        }
+    } else {
+        transfer_tokens_and_send_funds(
+            ExecuteContext {
+                deps,
+                info,
+                env,
+                amp_ctx,
+            },
+            limit,
+        )
+    }
+}
+
+fn issue_refunds_and_burn_tokens(
+    deps: &mut DepsMut,
+    env: Env,
+    limit: Option<u32>,
+) -> Result<Response, ContractError> {
+    let state = STATE.load(deps.storage)?;
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
+    ensure!(limit > 0, ContractError::LimitMustNotBeZero {});
+    let mut refund_msgs: Vec<CosmosMsg> = vec![];
+    // Issue refunds for `limit` number of users.
+    let purchases: Vec<Vec<Purchase>> = PURCHASES
+        .range(deps.storage, None, None, Order::Ascending)
+        .take(limit)
+        .flatten()
+        .map(|(_v, p)| p)
+        .collect();
+    for purchase_vec in purchases.iter() {
+        let refund_msg = process_refund(deps.storage, purchase_vec, &state.price);
+        if let Some(refund_msg) = refund_msg {
+            refund_msgs.push(refund_msg);
+        }
+    }
+
+    // Burn `limit` number of tokens
+    let burn_msgs = get_burn_messages(deps, env.contract.address.to_string(), limit)?;
+
+    if burn_msgs.is_empty() && purchases.is_empty() {
+        // When all tokens have been burned and all purchases have been refunded, the sale is over.
+        clear_state(deps.storage)?;
+    }
+
+    Ok(Response::new()
+        .add_attribute("action", "issue_refunds_and_burn_tokens")
+        .add_messages(refund_msgs)
+        .add_messages(burn_msgs))
 }
 
 fn transfer_tokens_and_send_funds(
@@ -642,6 +742,46 @@ fn transfer_tokens_and_send_funds(
         .add_submessages(merge_sub_msgs(rate_messages)))
 }
 
+/// Processes a vector of purchases for the SAME user by merging all funds into a single BankMsg.
+/// The given purchaser is then removed from `PURCHASES`.
+///
+/// ## Arguments
+/// * `storage`  - Mutable reference to Storage
+/// * `purchase` - Vector of purchases for the same user to issue a refund message for.
+/// * `price`    - The price of a token
+///
+/// Returns an `Option<CosmosMsg>` which is `None` when the amount to refund is zero.
+fn process_refund(
+    storage: &mut dyn Storage,
+    purchases: &[Purchase],
+    price: &Coin,
+) -> Option<CosmosMsg> {
+    let purchaser = purchases[0].purchaser.clone();
+    // Remove each entry as they get processed.
+    PURCHASES.remove(storage, &purchaser);
+    // Reduce a user's purchases into one message. While the tax paid on each item should
+    // be the same, it is not guaranteed given that the rates module is mutable during the
+    // sale.
+    let amount = purchases
+        .iter()
+        // This represents the total amount of funds they sent for each purchase.
+        .map(|p| p.tax_amount + price.amount)
+        // Adds up all of the purchases.
+        .reduce(|accum, item| accum + item)
+        .unwrap_or_else(Uint128::zero);
+
+    if amount > Uint128::zero() {
+        Some(CosmosMsg::Bank(BankMsg::Send {
+            to_address: purchaser,
+            amount: vec![Coin {
+                denom: price.denom.clone(),
+                amount,
+            }],
+        }))
+    } else {
+        None
+    }
+}
 
 fn get_burn_messages(
     deps: &mut DepsMut,
