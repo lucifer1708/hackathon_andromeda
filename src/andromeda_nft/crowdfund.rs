@@ -23,9 +23,9 @@ pub enum ExecuteMsg {
         /// When the sale ends.
         expiration: Expiration,
         /// The price per token.
-        price: Option<Coin>,
+        price: Coin,
         /// The minimum amount of tokens sold to go through with the sale.
-        min_tokens_sold: Uint128,
+        // min_tokens_sold: Uint128,
         /// The amount of tokens a wallet can purchase, default is 1.
         max_amount_per_wallet: Option<u32>,
         /// The recipient of the funds if the sale met the minimum sold.
@@ -77,9 +77,9 @@ pub struct State {
     /// The expiration denoting when the sale ends.
     pub expiration: Expiration,
     /// The price of each token.
-    pub price: Option<Coin>,
+    pub price: Coin,
     /// The minimum number of tokens sold for the sale to go through.
-    pub min_tokens_sold: Uint128,
+    // pub min_tokens_sold: Uint128,
     /// The max number of tokens allowed per wallet.
     pub max_amount_per_wallet: u32,
     /// Number of tokens sold.

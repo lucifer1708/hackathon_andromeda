@@ -12,31 +12,28 @@ use crate::state::{
 use andromeda_std::amp::{messages::AMPPkt, recipient::Recipient};
 use andromeda_std::{ado_contract::ADOContract, common::context::ExecuteContext};
 
-use andromeda_std::ado_base::hooks::AndromedaHook;
-use andromeda_std::ado_base::InstantiateMsg as BaseInstantiateMsg;
 use andromeda_std::{
+    ado_base::{hooks::AndromedaHook, InstantiateMsg as BaseInstantiateMsg},
     common::{deduct_funds, encode_binary, merge_sub_msgs, rates::get_tax_amount, Funds},
     error::{from_semver, ContractError},
-    Expiration,
 };
 use cw2::{get_contract_version, set_contract_version};
+use semver::Version;
 
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    coin, coins, ensure, has_coins, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env,
-    MessageInfo, Order, QuerierWrapper, QueryRequest, Reply, Response, StdError, Storage, SubMsg,
-    Uint128, WasmMsg, WasmQuery,
+    coins, ensure, has_coins, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
+    Order, QuerierWrapper, QueryRequest, Reply, Response, StdError, Storage, SubMsg, Uint128,
+    WasmMsg, WasmQuery,
 };
 use cw721::TokensResponse;
+use cw_utils::{nonpayable, Expiration};
 use std::cmp;
 
-use cw_utils::nonpayable;
-use semver::Version;
 const MAX_LIMIT: u32 = 100;
 const DEFAULT_LIMIT: u32 = 50;
 pub(crate) const MAX_MINT_LIMIT: u32 = 100;
-
 const CONTRACT_NAME: &str = "crates.io:andromeda-crowdfund";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -125,20 +122,12 @@ pub fn handle_execute(ctx: ExecuteContext, msg: ExecuteMsg) -> Result<Response, 
         ExecuteMsg::StartSale {
             expiration,
             price,
-            min_tokens_sold,
             max_amount_per_wallet,
             recipient,
-        } => execute_start_sale(
-            ctx,
-            expiration,
-            price,
-            min_tokens_sold,
-            max_amount_per_wallet,
-            recipient,
-        ),
+        } => execute_start_sale(ctx, expiration, price, max_amount_per_wallet, recipient),
         ExecuteMsg::Purchase { number_of_tokens } => execute_purchase(ctx, number_of_tokens),
         ExecuteMsg::PurchaseByTokenId { token_id } => execute_purchase_by_token_id(ctx, token_id),
-        ExecuteMsg::ClaimRefund {} => execute_claim_refund(ctx),
+        // ExecuteMsg::ClaimRefund {} => execute_claim_refund(ctx),
         ExecuteMsg::EndSale { limit } => execute_end_sale(ctx, limit),
         _ => ADOContract::default().execute(ctx, msg),
     }
@@ -237,8 +226,7 @@ fn mint(
 fn execute_start_sale(
     ctx: ExecuteContext,
     expiration: Expiration,
-    price: Option<Coin>,
-    min_tokens_sold: Uint128,
+    price: Coin,
     max_amount_per_wallet: Option<u32>,
     recipient: Recipient,
 ) -> Result<Response, ContractError> {
@@ -268,13 +256,12 @@ fn execute_start_sale(
     let max_amount_per_wallet = max_amount_per_wallet.unwrap_or(1u32);
 
     // This is to prevent cloning price.
-    let price_str = price.as_ref().unwrap_or(&coin(0, "uusd")).to_string();
+    let price_str = price.to_string();
     STATE.save(
         deps.storage,
         &State {
             expiration,
             price,
-            min_tokens_sold,
             max_amount_per_wallet,
             amount_sold: Uint128::zero(),
             amount_to_send: Uint128::zero(),
@@ -289,7 +276,6 @@ fn execute_start_sale(
         .add_attribute("action", "start_sale")
         .add_attribute("expiration", expiration.to_string())
         .add_attribute("price", price_str)
-        .add_attribute("min_tokens_sold", min_tokens_sold)
         .add_attribute("max_amount_per_wallet", max_amount_per_wallet.to_string()))
 }
 
@@ -396,7 +382,7 @@ fn execute_purchase(
     deduct_funds(&mut funds, &required_payment)?;
 
     // If any funds were remaining after deduction, send refund.
-    let resp = if has_coins(&funds, &Coin::new(1, state.price.unwrap().denom)) {
+    let resp = if has_coins(&funds, &Coin::new(1, state.price.denom)) {
         Response::new().add_message(BankMsg::Send {
             to_address: sender,
             amount: funds,
@@ -431,8 +417,8 @@ fn purchase_tokens(
 
     // CHECK :: The user has sent enough funds to cover the base fee (without any taxes).
     let total_cost = Coin::new(
-        state.price.as_ref().unwrap().amount.u128() * number_of_tokens_purchased as u128,
-        state.price.as_ref().unwrap().denom.clone(),
+        state.price.amount.u128() * number_of_tokens_purchased as u128,
+        state.price.denom.clone(),
     );
     ensure!(
         has_coins(&info.funds, &total_cost),
@@ -445,7 +431,7 @@ fn purchase_tokens(
     let (msgs, _events, remainder) = ADOContract::default().on_funds_transfer(
         &deps.as_ref(),
         info.sender.to_string(),
-        Funds::Native(state.price.clone().expect("Price value is not defined")),
+        Funds::Native(state.price.clone()),
         encode_binary(&"")?,
     )?;
 
@@ -453,11 +439,7 @@ fn purchase_tokens(
     for token_id in token_ids {
         let remaining_amount = remainder.try_get_coin()?;
 
-        let tax_amount = get_tax_amount(
-            &msgs,
-            state.price.as_ref().unwrap().amount,
-            remaining_amount.amount,
-        );
+        let tax_amount = get_tax_amount(&msgs, state.price.amount, remaining_amount.amount);
 
         let purchase = Purchase {
             token_id: token_id.clone(),
@@ -480,9 +462,8 @@ fn purchase_tokens(
 
     // CHECK :: User has sent enough to cover taxes.
     let required_payment = Coin {
-        denom: state.price.as_ref().unwrap().denom.clone(),
-        amount: state.price.as_ref().unwrap().amount
-            * Uint128::from(number_of_tokens_purchased as u128)
+        denom: state.price.denom.clone(),
+        amount: state.price.amount * Uint128::from(number_of_tokens_purchased as u128)
             + total_tax_amount,
     };
     ensure!(
@@ -492,39 +473,9 @@ fn purchase_tokens(
     Ok(required_payment)
 }
 
-fn execute_claim_refund(ctx: ExecuteContext) -> Result<Response, ContractError> {
-    let ExecuteContext {
-        deps, info, env, ..
-    } = ctx;
-    nonpayable(&info)?;
-
-    let state = STATE.may_load(deps.storage)?;
-    ensure!(state.is_some(), ContractError::NoOngoingSale {});
-    let state = state.unwrap();
-    ensure!(
-        state.expiration.is_expired(&env.block),
-        ContractError::SaleNotEnded {}
-    );
-    ensure!(
-        state.amount_sold < state.min_tokens_sold,
-        ContractError::MinSalesExceeded {}
-    );
-
-    let purchases = PURCHASES.may_load(deps.storage, info.sender.as_str())?;
-    ensure!(purchases.is_some(), ContractError::NoPurchases {});
-    let purchases = purchases.unwrap();
-    let refund_msg = process_refund(deps.storage, &purchases, Some(&state.price.unwrap()));
-    let mut resp = Response::new();
-    if let Some(refund_msg) = refund_msg {
-        resp = resp.add_message(refund_msg);
-    }
-
-    Ok(resp.add_attribute("action", "claim_refund"))
-}
-
 fn execute_end_sale(ctx: ExecuteContext, limit: Option<u32>) -> Result<Response, ContractError> {
     let ExecuteContext {
-        mut deps,
+        deps,
         info,
         env,
         amp_ctx,
@@ -540,83 +491,15 @@ fn execute_end_sale(ctx: ExecuteContext, limit: Option<u32>) -> Result<Response,
         state.expiration.is_expired(&env.block) || number_of_tokens_available.is_zero(),
         ContractError::SaleNotEnded {}
     );
-    if state.amount_sold < state.min_tokens_sold {
-        issue_refunds_and_burn_tokens(&mut deps, env, limit)
-    } else {
-        distribute_rewards(&deps)?;
-        transfer_tokens_and_send_funds(
-            ExecuteContext {
-                deps,
-                info,
-                env,
-                amp_ctx,
-            },
-            limit,
-        )
-    }
-}
-
-fn distribute_rewards(deps: &DepsMut) -> Result<Response, ContractError> {
-    let _config = CONFIG.load(deps.storage)?;
-    let reward_token = "uusd";
-    let reward_amount_per_contributor = Uint128::new(10);
-
-    let purchaser: Vec<Vec<Purchase>> = PURCHASES
-        .range(deps.storage, None, None, Order::Ascending)
-        .flatten()
-        .map(|(_v, p)| p)
-        .collect();
-    let mut messages: Vec<CosmosMsg> = Vec::new();
-
-    for purchase in purchaser.iter() {
-        let purchaser = purchase[0].purchaser.clone();
-        let send_msg = BankMsg::Send {
-            to_address: purchaser,
-            amount: coins(reward_amount_per_contributor.u128(), reward_token),
-        };
-        messages.push(CosmosMsg::Bank(send_msg));
-    }
-
-    Ok(Response::new()
-        .add_messages(messages)
-        .add_attribute("action", "distribute_rewards"))
-}
-
-fn issue_refunds_and_burn_tokens(
-    deps: &mut DepsMut,
-    env: Env,
-    limit: Option<u32>,
-) -> Result<Response, ContractError> {
-    let state = STATE.load(deps.storage)?;
-    let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
-    ensure!(limit > 0, ContractError::LimitMustNotBeZero {});
-    let mut refund_msgs: Vec<CosmosMsg> = vec![];
-    // Issue refunds for `limit` number of users.
-    let purchases: Vec<Vec<Purchase>> = PURCHASES
-        .range(deps.storage, None, None, Order::Ascending)
-        .take(limit)
-        .flatten()
-        .map(|(_v, p)| p)
-        .collect();
-    for purchase_vec in purchases.iter() {
-        let refund_msg = process_refund(deps.storage, purchase_vec, state.price.as_ref());
-        if let Some(refund_msg) = refund_msg {
-            refund_msgs.push(refund_msg);
-        }
-    }
-
-    // Burn `limit` number of tokens
-    let burn_msgs = get_burn_messages(deps, env.contract.address.to_string(), limit)?;
-
-    if burn_msgs.is_empty() && purchases.is_empty() {
-        // When all tokens have been burned and all purchases have been refunded, the sale is over.
-        clear_state(deps.storage)?;
-    }
-
-    Ok(Response::new()
-        .add_attribute("action", "issue_refunds_and_burn_tokens")
-        .add_messages(refund_msgs)
-        .add_messages(burn_msgs))
+    transfer_tokens_and_send_funds(
+        ExecuteContext {
+            deps,
+            info,
+            env,
+            amp_ctx,
+        },
+        limit,
+    )
 }
 
 fn transfer_tokens_and_send_funds(
@@ -643,7 +526,7 @@ fn transfer_tokens_and_send_funds(
     if state.amount_transferred == state.amount_sold {
         if state.amount_to_send > Uint128::zero() {
             let funds = vec![Coin {
-                denom: state.price.clone().unwrap().denom.clone(),
+                denom: state.price.denom.clone(),
                 amount: state.amount_to_send,
             }];
             match state.recipient.msg.clone() {
@@ -660,7 +543,7 @@ fn transfer_tokens_and_send_funds(
                         kernel_address,
                         Some(coins(
                             state.amount_to_send.u128(),
-                            state.price.as_ref().unwrap().denom.clone(),
+                            state.price.denom.clone(),
                         )),
                         1,
                     )?;
@@ -759,46 +642,6 @@ fn transfer_tokens_and_send_funds(
         .add_submessages(merge_sub_msgs(rate_messages)))
 }
 
-/// Processes a vector of purchases for the SAME user by merging all funds into a single BankMsg.
-/// The given purchaser is then removed from `PURCHASES`.
-///
-/// ## Arguments
-/// * `storage`  - Mutable reference to Storage
-/// * `purchase` - Vector of purchases for the same user to issue a refund message for.
-/// * `price`    - The price of a token
-///
-/// Returns an `Option<CosmosMsg>` which is `None` when the amount to refund is zero.
-fn process_refund(
-    storage: &mut dyn Storage,
-    purchases: &[Purchase],
-    price: Option<&Coin>,
-) -> Option<CosmosMsg> {
-    let purchaser = purchases[0].purchaser.clone();
-    // Remove each entry as they get processed.
-    PURCHASES.remove(storage, &purchaser);
-    // Reduce a user's purchases into one message. While the tax paid on each item should
-    // be the same, it is not guaranteed given that the rates module is mutable during the
-    // sale.
-    let amount = purchases
-        .iter()
-        // This represents the total amount of funds they sent for each purchase.
-        .map(|p| p.tax_amount + price.unwrap().amount)
-        // Adds up all of the purchases.
-        .reduce(|accum, item| accum + item)
-        .unwrap_or_else(Uint128::zero);
-
-    if amount > Uint128::zero() {
-        Some(CosmosMsg::Bank(BankMsg::Send {
-            to_address: purchaser,
-            amount: vec![Coin {
-                denom: price.unwrap().denom.clone(),
-                amount,
-            }],
-        }))
-    } else {
-        None
-    }
-}
 
 fn get_burn_messages(
     deps: &mut DepsMut,

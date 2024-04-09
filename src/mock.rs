@@ -57,14 +57,14 @@ impl MockCrowdfund {
         app: &mut App,
         expiration: Expiration,
         price: Coin,
-        min_tokens_sold: Uint128,
+        // min_tokens_sold: Uint128,
         max_amount_per_wallet: Option<u32>,
         recipient: Recipient,
     ) -> ExecuteResult {
         let msg = mock_start_crowdfund_msg(
             expiration,
             price,
-            min_tokens_sold,
+            // min_tokens_sold,
             max_amount_per_wallet,
             recipient,
         );
@@ -143,14 +143,14 @@ pub fn mock_crowdfund_instantiate_msg(
 pub fn mock_start_crowdfund_msg(
     expiration: Expiration,
     price: Coin,
-    min_tokens_sold: Uint128,
+    // min_tokens_sold: Uint128,
     max_amount_per_wallet: Option<u32>,
     recipient: Recipient,
 ) -> ExecuteMsg {
     ExecuteMsg::StartSale {
         expiration,
         price,
-        min_tokens_sold,
+        // min_tokens_sold,
         max_amount_per_wallet,
         recipient,
     }
